@@ -1248,6 +1248,6 @@ func TestInsertBatchWithDefaule(t *testing.T) {
 			t.Error("falil")
 		}
 		log.Println(res.StartTime)
-		fmt.Println("insert 1000000 records cost time ", time.Now().Sub(start))
+		fmt.Println("insert 1000 records cost time ", time.Now().Sub(start))
 	})
 }
