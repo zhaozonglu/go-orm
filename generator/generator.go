@@ -114,6 +114,9 @@ func generateModel(dbName, shortTName, tName string, schema drivers.TableSchema,
 		//增加json和db标签
 		jsonTag := fmt.Sprintf("json:\"%s\"", col.ColumnName)
 		tagArr = append(tagArr, jsonTag)
+		//增加default标签
+		defaultTag := fmt.Sprintf("default:\"%s\"", col.DefaultValue)
+		tagArr = append(tagArr, defaultTag)
 		if field.IsPrimaryKey {
 			tagArr = append(tagArr, "pk:\"true\"")
 			if model.PrimaryField != nil {

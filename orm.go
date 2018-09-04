@@ -1078,10 +1078,15 @@ func columnsByStruct(s interface{}) (string, string, []interface{}, reflect.Valu
 		}
 		cols += str
 		vals += "?"
+		defaultVal := ft.Tag.Get("default")
 		r := v.Field(k).Addr().Interface()
 		if v.Field(k).Type().String() == "time.Time" {
 			if r.(*time.Time).IsZero() {
-				r = &zeroTime
+				if defaultVal == "" {
+					r = &zeroTime
+				} else {
+					r = &defaultVal
+				}
 			}
 		}
 
@@ -1155,10 +1160,16 @@ func columnsBySlice(s []interface{}) (string, string, []interface{}, []reflect.V
 			}
 			vals.WriteString("?")
 			isFirst = false
+			defaultVal := ft.Tag.Get("default")
 			r := v.Field(k).Addr().Interface()
 			if v.Field(k).Type().String() == "time.Time" {
 				if r.(*time.Time).IsZero() {
-					r = &zeroTime
+					if defaultVal == "" {
+						r = &zeroTime
+					} else {
+						r = &defaultVal
+					}
+
 				}
 			}
 			ret = append(ret, r)
@@ -1255,7 +1266,18 @@ func insertBatch(c context.Context, tdx Tdx, s []interface{}) error {
 	if s == nil || len(s) == 0 {
 		return nil
 	}
-	//todo 需要check s中的数据都是同一种类型
+	//check s中的数据都是同一种类型
+	var typeStr string
+	for _, item := range s {
+		if typeStr == "" {
+			typeStr = reflect.TypeOf(item).String()
+		}
+		if typeStr != "" && typeStr == reflect.TypeOf(item).String() {
+			continue
+		} else {
+			return fmt.Errorf("Slice must be of the same type.[%s],[%s]", typeStr, reflect.TypeOf(item).String())
+		}
+	}
 	cols, vals, ifs, pks, ais := columnsBySlice(s)
 
 	q := fmt.Sprintf("insert into %s %s values %s", getTableName(s[0]), cols, vals)

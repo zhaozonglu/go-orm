@@ -46,8 +46,8 @@ type TestOrmD222 struct {
 }
 
 type TestOrmE333 struct {
-	TestOrmEId  int64 `pk:"true" ai:"true"`
-	Name        string
+	TestOrmEId  int64  `pk:"true" ai:"true"`
+	Name        string `json:"name" db:"name"`
 	Description sql.NullString
 	VInt64      int64
 	VInt        int
@@ -56,7 +56,7 @@ type TestOrmE333 struct {
 	VBoolean    bool
 	VBigDecimal float64
 	VFloat      float64
-	StartTime   time.Time
+	StartTime   time.Time `json:"start_time" db:"start_time" default:"2018-01-01 00:00:00"`
 	CreatedAt   time.Time `ignore:"true"`
 }
 
@@ -70,7 +70,7 @@ func (obj TestOrmF123) TableName() string {
 }
 
 func oneTestScope(fn func(orm *ORM, testTableName string)) {
-	orm := NewORM("root@/orm_test?parseTime=true&loc=Local")
+	orm := NewORM("root:12345678@tcp(127.0.0.1:3306)/orm_test?parseTime=true&loc=Local&allowNativePasswords=true")
 	orm.TruncateTables()
 	_, err := orm.Exec(`
         CREATE TABLE IF NOT EXISTS test_orm_a123 (
@@ -1211,5 +1211,43 @@ func TestTableName(t *testing.T) {
 			t.Fatal("select int array error", err)
 		}
 		t.Log(result)
+	})
+}
+
+func TestInsertWithDefault(t *testing.T) {
+	oneTestScope(func(orm *ORM, testTableName string) {
+		testObj := &TestOrmE333{
+			Name: "test-121",
+		}
+		err := orm.Insert(testObj)
+		if err != nil {
+			t.Error(err)
+		}
+
+		arr := &TestOrmE333{}
+		if orm.SelectOne(arr, "select * from test_orm_e333 where name = 'test-121'") != nil {
+			t.Error(err)
+		}
+		log.Println(arr.StartTime)
+		log.Println(arr.Name)
+	})
+}
+
+func TestInsertBatchWithDefaule(t *testing.T) {
+	oneTestScope(func(orm *ORM, testTableName string) {
+		list := make([]interface{}, 0, 1000)
+		for i := 0; i < 1000; i++ {
+			list = append(list, &TestOrmE333{
+				Name: "test测试",
+			})
+		}
+		start := time.Now()
+		orm.InsertBatch(list)
+		res := &TestOrmE333{}
+		if orm.SelectOne(res, "select * from test_orm_e333 where name = 'test测试'") != nil {
+			t.Error("falil")
+		}
+		log.Println(res.StartTime)
+		fmt.Println("insert 1000000 records cost time ", time.Now().Sub(start))
 	})
 }
