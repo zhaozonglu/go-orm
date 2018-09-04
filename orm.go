@@ -5,22 +5,21 @@ package orm
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
 
 	_ "github.com/go-sql-driver/mysql"
-	//"strconv"
-	"context"
-	"encoding/json"
-	"strconv"
+	"github.com/sirupsen/logrus"
 )
 
 var sqlParamReg *regexp.Regexp
@@ -90,7 +89,7 @@ func reflectStruct(s interface{}, cols []string, row *sql.Rows) error {
 }
 func reflectStructValue(v reflect.Value, t reflect.Type, cols []string, row *sql.Rows) error {
 	if v.Kind() != reflect.Ptr {
-		panic(errors.New("holder should be pointer"))
+		return errors.New("holder should be pointer")
 	}
 	v = v.Elem()
 	targets := make([]interface{}, len(cols))
@@ -106,7 +105,7 @@ func reflectStructValue(v reflect.Value, t reflect.Type, cols []string, row *sql
 		}
 		fv := v.FieldByName(col)
 		if !fv.CanAddr() {
-			log.Println("missing filed", c)
+			logrus.Infof("missing filed :%s", c)
 			var b interface{}
 			targets[k] = &b
 		} else {
@@ -163,7 +162,7 @@ func checkTableColumns(tdx Tdx, s interface{}) error {
 	if err != nil {
 		return err
 	}
-	log.Println(tableName, cols)
+	logrus.WithField("table", tableName).WithField("cols", cols).Info()
 	return checkStruct(s, cols, tableName)
 }
 
@@ -188,8 +187,15 @@ type SqlLogger interface {
 type VerboseSqlLogger struct{}
 
 func (n *VerboseSqlLogger) Log(c context.Context, sqlLog *SqlLog) {
-	data, _ := json.Marshal(sqlLog)
-	log.Printf("[go-orm] %v\n", string(data))
+	logs := logrus.WithFields(logrus.Fields{
+		"Sql":      sqlLog.Sql,
+		"Duration": sqlLog.Duration,
+	})
+	if len(sqlLog.Explain) > 0 {
+		data, _ := json.Marshal(sqlLog.Explain)
+		logs = logs.WithField("Explain", string(data))
+	}
+	logs.Info()
 }
 
 func (n *VerboseSqlLogger) ShowExplain(dur time.Duration) bool {
@@ -243,7 +249,7 @@ func doExplain(tdx Tdx, query string, args ...interface{}) ([]*Explain, error) {
 		cols, err := rows.Columns()
 		err = reflectStruct(&e, cols, rows)
 		if err != nil {
-			log.Println("reflect err", err)
+			logrus.WithError(err).Error("reflect err")
 		}
 		exp = append(exp, &Explain{Table: e.Table.String, KeyLen: e.KeyLen.Int64, Type: e.Type.String, Key: e.Key.String, Ref: e.Ref.String, Rows: e.Rows.Int64, Extra: e.Extra.String})
 	}
@@ -282,7 +288,6 @@ func query(c context.Context, tdx Tdx, queryStr string, args ...interface{}) (re
 
 func execWithParam(c context.Context, tdx Tdx, paramQuery string, paramMap interface{}) (sql.Result, error) {
 	params := sqlParamReg.FindAllString(paramQuery, -1)
-	log.Println(params)
 	if params != nil && len(params) > 0 {
 		var args []interface{} = make([]interface{}, 0, len(params))
 		for _, param := range params {
@@ -352,7 +357,7 @@ type orColumn struct {
 /**
 返回三个值，一个是struct主键的field，一个是主键对应的数据库的值 ，一个是[]*orColumn
 */
-func getOrColumns(s interface{}) (string, string, []*orColumn) {
+func getOrColumns(s interface{}) (string, string, []*orColumn, error) {
 	t := reflect.TypeOf(s).Elem()
 	return getOrColumnsByType(t)
 }
@@ -360,7 +365,7 @@ func getOrColumns(s interface{}) (string, string, []*orColumn) {
 /**
 根据struct中的值找到其他struct进行relation的联系，并组成[]*orColumn结构,返回三个值，一个是struct主键的field，一个是主键对应的数据库的值 ，一个是[]*orColumn
 */
-func getOrColumnsByType(t reflect.Type) (string, string, []*orColumn) {
+func getOrColumnsByType(t reflect.Type) (string, string, []*orColumn, error) {
 	res := make([]*orColumn, 0)
 	pkCol := ""
 	pkField := ""
@@ -373,27 +378,27 @@ func getOrColumnsByType(t reflect.Type) (string, string, []*orColumn) {
 				var orType reflect.Type
 				if orTag == "has_one" {
 					if ft.Type.Kind() != reflect.Ptr {
-						panic(errors.New(ft.Name + " should be pointer"))
+						return "", "", res, errors.New(ft.Name + " should be pointer")
 					}
 					orType = ft.Type.Elem()
 				} else if orTag == "has_many" {
 					if ft.Type.Kind() != reflect.Slice {
-						panic(errors.New(ft.Name + " should be slice of pointer"))
+						return "", "", res, errors.New(ft.Name + " should be slice of pointer")
 					}
 					elemType := ft.Type.Elem()
 					if elemType.Kind() != reflect.Ptr {
-						panic(errors.New(ft.Name + " should be slice of pointer"))
+						return "", "", res, errors.New(ft.Name + " should be slice of pointer")
 					}
 					orType = elemType.Elem()
 				} else if orTag == "belongs_to" {
 					if ft.Type.Kind() != reflect.Ptr {
-						panic(errors.New(ft.Name + " should be pointer"))
+						return "", "", res, errors.New(ft.Name + " should be pointer")
 					}
 					orType = ft.Type.Elem()
 				}
 				orTableName := ft.Tag.Get("table")
 				if orTableName == "" {
-					panic(errors.New("invalid table name in or tag on field: " + ft.Name))
+					return "", "", res, errors.New("invalid table name in or tag on field: " + ft.Name)
 				}
 				res = append(res, &orColumn{
 					fieldName: ft.Name,
@@ -402,7 +407,7 @@ func getOrColumnsByType(t reflect.Type) (string, string, []*orColumn) {
 					orType:    orType,
 				})
 			} else {
-				panic(errors.New("unsupported or tag: " + orTag + ", only support has_one, has_many and belongs_to for now"))
+				return "", "", res, errors.New("unsupported or tag: " + orTag + ", only support has_one, has_many and belongs_to for now")
 			}
 		}
 		dbTag := ft.Tag.Get("db")
@@ -421,7 +426,7 @@ func getOrColumnsByType(t reflect.Type) (string, string, []*orColumn) {
 			pkField = ft.Name
 		}
 	}
-	return pkField, pkCol, res
+	return pkField, pkCol, res, nil
 }
 
 /**
@@ -458,7 +463,10 @@ func selectOne(c context.Context, tdx Tdx, s interface{}, query string, args ...
 	if err != nil {
 		return err
 	}
-	pkField, pkCol, orColumns := getOrColumns(s)
+	pkField, pkCol, orColumns, err := getOrColumns(s)
+	if err != nil {
+		return err
+	}
 	if orColumns != nil && len(orColumns) > 0 {
 		v := reflect.ValueOf(s).Elem()
 		pkValue, err := getFieldValue(s, pkField)
@@ -481,7 +489,7 @@ func selectOne(c context.Context, tdx Tdx, s interface{}, query string, args ...
 			} else if orCol.or == "belongs_to" {
 				fk := getPkColumnByType(orCol.orType)
 				if fk == "" {
-					panic(errors.New("error while getting primary key of " + orCol.table + " for belongs_to"))
+					return errors.New("error while getting primary key of " + orCol.table + " for belongs_to")
 				}
 				fkValue, err := getFieldValue(s, colName2FieldName(fk))
 				if err != nil {
@@ -668,7 +676,7 @@ func selectRawSet(c context.Context, tdx Tdx, queryStr string, columnMaps map[st
 		err = rows.Scan(itemList...)
 
 		if err != nil {
-			log.Printf("%+v, %+v\n", err, rows)
+			logrus.WithError(err).WithField("rows", rows).Error("scan err")
 			return dataSet, err
 		}
 		for k, c := range cols {
@@ -712,7 +720,7 @@ func selectRaw(c context.Context, tdx Tdx, queryStr string, args ...interface{})
 		err = rows.Scan(itemList...)
 
 		if err != nil {
-			log.Printf("%v, %v\n", err, rows)
+			logrus.WithError(err).WithField("rows", rows).Error("scan err")
 			return colNames, data, err
 		}
 		for k, _ := range colNames {
@@ -804,7 +812,10 @@ func selectManyInternal(c context.Context, tdx Tdx, s interface{}, processOr boo
 	if isPtr {
 		t = t.Elem()
 		if processOr {
-			pkField, pkCol, orCols = getOrColumnsByType(t)
+			pkField, pkCol, orCols, err = getOrColumnsByType(t)
+			if err != nil {
+				return err
+			}
 			if orCols != nil && len(orCols) > 0 {
 				hasOrCols = true
 			}
@@ -839,7 +850,7 @@ func selectManyInternal(c context.Context, tdx Tdx, s interface{}, processOr boo
 				}
 				fv := v.Elem().FieldByName(fName)
 				if !fv.CanAddr() {
-					log.Printf("missing field: %s , query: %s\n", fName, queryStr)
+					logrus.WithField("sql", queryStr).Errorf("missing field: %s", fName)
 					var b interface{}
 					targets[k] = &b
 				} else {
@@ -1317,7 +1328,7 @@ func newORMWithDriver(ds string, driverName string) *ORM {
 	var err error
 	ret.db, err = sql.Open(driverName, ds)
 	if err != nil {
-		log.Fatalln("can not connect to db:", err)
+		logrus.WithError(err).Fatal("Can not connect to db")
 	}
 	ret.db.SetMaxOpenConns(100)
 	ret.db.SetMaxIdleConns(5)
@@ -1338,7 +1349,7 @@ func (o *ORM) CheckTables() {
 	for _, s := range o.tables {
 		err := checkTableColumns(o.db, s)
 		if err != nil {
-			log.Fatalln("can not pass table check:", err)
+			logrus.WithError(err).Fatal("Can not pass table check")
 		}
 	}
 }
@@ -1587,7 +1598,7 @@ func (o *ORMTran) ExecWithRowAffectCheck(n int64, query string, args ...interfac
 }
 
 func NormalizeValue(valueType string, value interface{}) (interface{}, error) {
-	log.Printf("NormalizeValue: type=%v value=%v\n", reflect.TypeOf(value), reflect.ValueOf(value))
+	logrus.WithField("type", reflect.TypeOf(value)).WithField("value", reflect.ValueOf(value)).Info("NormalizeValue")
 	switch value.(type) {
 	case string:
 		return value.(string), nil
